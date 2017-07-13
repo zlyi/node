@@ -28,6 +28,45 @@ using compiler::CodeAssemblerVariableList;
 
 namespace {
 
+int sum9(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
+         int a8) {
+  return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8;
+}
+
+}  // namespace
+
+TEST(CallCFunction9) {
+  Isolate* isolate(CcTest::InitIsolateOnce());
+
+  const int kNumParams = 0;
+  CodeAssemblerTester data(isolate, kNumParams);
+  CodeStubAssembler m(data.state());
+
+  {
+    Node* const fun_constant = m.ExternalConstant(
+        ExternalReference(reinterpret_cast<Address>(sum9), isolate));
+
+    MachineType type_intptr = MachineType::IntPtr();
+
+    Node* const result = m.CallCFunction9(
+        type_intptr, type_intptr, type_intptr, type_intptr, type_intptr,
+        type_intptr, type_intptr, type_intptr, type_intptr, type_intptr,
+        fun_constant, m.IntPtrConstant(0), m.IntPtrConstant(1),
+        m.IntPtrConstant(2), m.IntPtrConstant(3), m.IntPtrConstant(4),
+        m.IntPtrConstant(5), m.IntPtrConstant(6), m.IntPtrConstant(7),
+        m.IntPtrConstant(8));
+    m.Return(m.SmiTag(result));
+  }
+
+  Handle<Code> code = data.GenerateCode();
+  FunctionTester ft(code, kNumParams);
+
+  Handle<Object> result = ft.Call().ToHandleChecked();
+  CHECK_EQ(36, Handle<Smi>::cast(result)->value());
+}
+
+namespace {
+
 void CheckToUint32Result(uint32_t expected, Handle<Object> result) {
   const int64_t result_int64 = NumberToInt64(*result);
   const uint32_t result_uint32 = NumberToUint32(*result);
@@ -312,29 +351,29 @@ TEST(TryToName) {
       m.TryToName(key, &if_keyisindex, &var_index, &if_keyisunique, &var_unique,
                   &if_bailout);
 
-      m.Bind(&if_keyisindex);
+      m.BIND(&if_keyisindex);
       m.GotoIfNot(m.WordEqual(expected_result,
                               m.SmiConstant(Smi::FromInt(kKeyIsIndex))),
                   &failed);
       m.Branch(m.WordEqual(m.SmiUntag(expected_arg), var_index.value()),
                &passed, &failed);
 
-      m.Bind(&if_keyisunique);
+      m.BIND(&if_keyisunique);
       m.GotoIfNot(m.WordEqual(expected_result,
                               m.SmiConstant(Smi::FromInt(kKeyIsUnique))),
                   &failed);
       m.Branch(m.WordEqual(expected_arg, var_unique.value()), &passed, &failed);
     }
 
-    m.Bind(&if_bailout);
+    m.BIND(&if_bailout);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kBailout))),
         &passed, &failed);
 
-    m.Bind(&passed);
+    m.BIND(&passed);
     m.Return(m.BooleanConstant(true));
 
-    m.Bind(&failed);
+    m.BIND(&failed);
     m.Return(m.BooleanConstant(false));
   }
 
@@ -462,7 +501,7 @@ void TestEntryToIndex() {
        entry = entry * 1.01 + 1) {
     Handle<Object> result =
         ft.Call(handle(Smi::FromInt(entry), isolate)).ToHandleChecked();
-    CHECK_EQ(Dictionary::EntryToIndex(entry), Smi::cast(*result)->value());
+    CHECK_EQ(Dictionary::EntryToIndex(entry), Smi::ToInt(*result));
   }
 }
 
@@ -496,22 +535,22 @@ void TestNameDictionaryLookup() {
 
     m.NameDictionaryLookup<Dictionary>(dictionary, unique_name, &if_found,
                                        &var_name_index, &if_not_found);
-    m.Bind(&if_found);
+    m.BIND(&if_found);
     m.GotoIfNot(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kFound))),
         &failed);
     m.Branch(m.WordEqual(m.SmiUntag(expected_arg), var_name_index.value()),
              &passed, &failed);
 
-    m.Bind(&if_not_found);
+    m.BIND(&if_not_found);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kNotFound))),
         &passed, &failed);
 
-    m.Bind(&passed);
+    m.BIND(&passed);
     m.Return(m.BooleanConstant(true));
 
-    m.Bind(&failed);
+    m.BIND(&failed);
     m.Return(m.BooleanConstant(false));
   }
 
@@ -538,7 +577,7 @@ void TestNameDictionaryLookup() {
   };
 
   for (size_t i = 0; i < arraysize(keys); i++) {
-    Handle<Object> value = factory->NewPropertyCell();
+    Handle<Object> value = factory->NewPropertyCell(keys[i]);
     dictionary = Dictionary::Add(dictionary, keys[i], value, fake_details);
   }
 
@@ -603,22 +642,22 @@ void TestNumberDictionaryLookup() {
 
     m.NumberDictionaryLookup<Dictionary>(dictionary, key, &if_found, &var_entry,
                                          &if_not_found);
-    m.Bind(&if_found);
+    m.BIND(&if_found);
     m.GotoIfNot(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kFound))),
         &failed);
     m.Branch(m.WordEqual(m.SmiUntag(expected_arg), var_entry.value()), &passed,
              &failed);
 
-    m.Bind(&if_not_found);
+    m.BIND(&if_not_found);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kNotFound))),
         &passed, &failed);
 
-    m.Bind(&passed);
+    m.BIND(&passed);
     m.Return(m.BooleanConstant(true));
 
-    m.Bind(&failed);
+    m.BIND(&failed);
     m.Return(m.BooleanConstant(false));
   }
 
@@ -743,24 +782,24 @@ TEST(TryHasOwnProperty) {
     m.TryHasOwnProperty(object, map, instance_type, unique_name, &if_found,
                         &if_not_found, &if_bailout);
 
-    m.Bind(&if_found);
+    m.BIND(&if_found);
     m.Branch(m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kFound))),
              &passed, &failed);
 
-    m.Bind(&if_not_found);
+    m.BIND(&if_not_found);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kNotFound))),
         &passed, &failed);
 
-    m.Bind(&if_bailout);
+    m.BIND(&if_bailout);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kBailout))),
         &passed, &failed);
 
-    m.Bind(&passed);
+    m.BIND(&passed);
     m.Return(m.BooleanConstant(true));
 
-    m.Bind(&failed);
+    m.BIND(&failed);
     m.Return(m.BooleanConstant(false));
   }
 
@@ -932,13 +971,13 @@ TEST(TryGetOwnProperty) {
                         unique_name, &if_found, &var_value, &if_not_found,
                         &if_bailout);
 
-    m.Bind(&if_found);
+    m.BIND(&if_found);
     m.Return(var_value.value());
 
-    m.Bind(&if_not_found);
+    m.BIND(&if_not_found);
     m.Return(m.HeapConstant(not_found_symbol));
 
-    m.Bind(&if_bailout);
+    m.BIND(&if_bailout);
     m.Return(m.HeapConstant(bailout_symbol));
   }
 
@@ -1147,28 +1186,28 @@ TEST(TryLookupElement) {
     m.TryLookupElement(object, map, instance_type, index, &if_found, &if_absent,
                        &if_not_found, &if_bailout);
 
-    m.Bind(&if_found);
+    m.BIND(&if_found);
     m.Branch(m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kFound))),
              &passed, &failed);
 
-    m.Bind(&if_absent);
+    m.BIND(&if_absent);
     m.Branch(m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kAbsent))),
              &passed, &failed);
 
-    m.Bind(&if_not_found);
+    m.BIND(&if_not_found);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kNotFound))),
         &passed, &failed);
 
-    m.Bind(&if_bailout);
+    m.BIND(&if_bailout);
     m.Branch(
         m.WordEqual(expected_result, m.SmiConstant(Smi::FromInt(kBailout))),
         &passed, &failed);
 
-    m.Bind(&passed);
+    m.BIND(&passed);
     m.Return(m.BooleanConstant(true));
 
-    m.Bind(&failed);
+    m.BIND(&failed);
     m.Return(m.BooleanConstant(false));
   }
 
@@ -1207,10 +1246,10 @@ TEST(TryLookupElement) {
   }
 
   {
-    Handle<JSArray> object = factory->NewJSArray(0, FAST_SMI_ELEMENTS);
+    Handle<JSArray> object = factory->NewJSArray(0, PACKED_SMI_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 1, smi0);
-    CHECK_EQ(FAST_SMI_ELEMENTS, object->map()->elements_kind());
+    CHECK_EQ(PACKED_SMI_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1220,10 +1259,10 @@ TEST(TryLookupElement) {
   }
 
   {
-    Handle<JSArray> object = factory->NewJSArray(0, FAST_HOLEY_SMI_ELEMENTS);
+    Handle<JSArray> object = factory->NewJSArray(0, HOLEY_SMI_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 13, smi0);
-    CHECK_EQ(FAST_HOLEY_SMI_ELEMENTS, object->map()->elements_kind());
+    CHECK_EQ(HOLEY_SMI_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_NOT_FOUND(object, 1);
@@ -1233,10 +1272,10 @@ TEST(TryLookupElement) {
   }
 
   {
-    Handle<JSArray> object = factory->NewJSArray(0, FAST_ELEMENTS);
+    Handle<JSArray> object = factory->NewJSArray(0, PACKED_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 1, smi0);
-    CHECK_EQ(FAST_ELEMENTS, object->map()->elements_kind());
+    CHECK_EQ(PACKED_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1246,10 +1285,10 @@ TEST(TryLookupElement) {
   }
 
   {
-    Handle<JSArray> object = factory->NewJSArray(0, FAST_HOLEY_ELEMENTS);
+    Handle<JSArray> object = factory->NewJSArray(0, HOLEY_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 13, smi0);
-    CHECK_EQ(FAST_HOLEY_ELEMENTS, object->map()->elements_kind());
+    CHECK_EQ(HOLEY_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_NOT_FOUND(object, 1);
@@ -1403,10 +1442,11 @@ TEST(AllocateJSObjectFromMap) {
                                           "object")));
     JSObject::NormalizeProperties(object, KEEP_INOBJECT_PROPERTIES, 0,
                                   "Normalize");
-    Handle<JSObject> result = Handle<JSObject>::cast(
-        ft.Call(handle(object->map()), handle(object->properties()),
-                handle(object->elements()))
-            .ToHandleChecked());
+    Handle<JSObject> result =
+        Handle<JSObject>::cast(ft.Call(handle(object->map(), isolate),
+                                       handle(object->properties(), isolate),
+                                       handle(object->elements(), isolate))
+                                   .ToHandleChecked());
     VERIFY(result, object->map(), object->properties(), object->elements());
     CHECK(!result->HasFastProperties());
 #ifdef VERIFY_HEAP
@@ -1718,9 +1758,9 @@ TEST(IsDebugActive) {
   CodeAssemblerLabel if_active(&m), if_not_active(&m);
 
   m.Branch(m.IsDebugActive(), &if_active, &if_not_active);
-  m.Bind(&if_active);
+  m.BIND(&if_active);
   m.Return(m.TrueConstant());
-  m.Bind(&if_not_active);
+  m.BIND(&if_not_active);
   m.Return(m.FalseConstant());
 
   Handle<Code> code = data.GenerateCode();
@@ -1768,12 +1808,11 @@ class AppendJSArrayCodeStubAssembler : public CodeStubAssembler {
     Variable arg_index(this, MachineType::PointerRepresentation());
     Label bailout(this);
     arg_index.Bind(IntPtrConstant(0));
-    Node* length = BuildAppendJSArray(
-        kind_, HeapConstant(Handle<HeapObject>(isolate->context(), isolate)),
-        HeapConstant(array), args, arg_index, &bailout);
+    Node* length = BuildAppendJSArray(kind_, HeapConstant(array), args,
+                                      arg_index, &bailout);
     Return(length);
 
-    Bind(&bailout);
+    BIND(&bailout);
     Return(SmiTag(IntPtrAdd(arg_index.value(), IntPtrConstant(2))));
 
     Handle<Code> code = tester->GenerateCode();
@@ -1788,7 +1827,7 @@ class AppendJSArrayCodeStubAssembler : public CodeStubAssembler {
 
     CHECK_EQ(kind_, array->GetElementsKind());
     CHECK_EQ(result_size, Handle<Smi>::cast(result)->value());
-    CHECK_EQ(result_size, Smi::cast(array->length())->value());
+    CHECK_EQ(result_size, Smi::ToInt(array->length()));
     Object* obj = *JSObject::GetElement(isolate, array, 2).ToHandleChecked();
     CHECK_EQ(result_size < 3 ? isolate->heap()->undefined_value() : o1, obj);
     obj = *JSObject::GetElement(isolate, array, 3).ToHandleChecked();
@@ -1816,63 +1855,63 @@ class AppendJSArrayCodeStubAssembler : public CodeStubAssembler {
 TEST(BuildAppendJSArrayFastElement) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4), Smi::FromInt(5),
-      Smi::FromInt(6), 6, 6);
+      isolate, PACKED_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      Smi::FromInt(5), Smi::FromInt(6), 6, 6);
 }
 
 TEST(BuildAppendJSArrayFastElementGrow) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4), Smi::FromInt(5),
-      Smi::FromInt(6), 2, 6);
+      isolate, PACKED_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      Smi::FromInt(5), Smi::FromInt(6), 2, 6);
 }
 
 TEST(BuildAppendJSArrayFastSmiElement) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       Smi::FromInt(5), Smi::FromInt(6), 6, 6);
 }
 
 TEST(BuildAppendJSArrayFastSmiElementGrow) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       Smi::FromInt(5), Smi::FromInt(6), 2, 6);
 }
 
 TEST(BuildAppendJSArrayFastSmiElementObject) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       isolate->heap()->undefined_value(), Smi::FromInt(6), 6, 4);
 }
 
 TEST(BuildAppendJSArrayFastSmiElementObjectGrow) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_SMI_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       isolate->heap()->undefined_value(), Smi::FromInt(6), 2, 4);
 }
 
 TEST(BuildAppendJSArrayFastDoubleElements) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_DOUBLE_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_DOUBLE_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       Smi::FromInt(5), Smi::FromInt(6), 6, 6);
 }
 
 TEST(BuildAppendJSArrayFastDoubleElementsGrow) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_DOUBLE_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_DOUBLE_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       Smi::FromInt(5), Smi::FromInt(6), 2, 6);
 }
 
 TEST(BuildAppendJSArrayFastDoubleElementsObject) {
   Isolate* isolate(CcTest::InitIsolateOnce());
   AppendJSArrayCodeStubAssembler::TestAppendJSArray(
-      isolate, FAST_DOUBLE_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
+      isolate, PACKED_DOUBLE_ELEMENTS, Smi::FromInt(3), Smi::FromInt(4),
       isolate->heap()->undefined_value(), Smi::FromInt(6), 6, 4);
 }
 
@@ -1970,10 +2009,11 @@ TEST(AllocatePromiseReactionJobInfo) {
   PromiseBuiltinsAssembler p(data.state());
 
   Node* const context = m.Parameter(kNumParams + 2);
-  Node* const tasks = m.AllocateFixedArray(FAST_ELEMENTS, m.IntPtrConstant(1));
+  Node* const tasks =
+      m.AllocateFixedArray(PACKED_ELEMENTS, m.IntPtrConstant(1));
   m.StoreFixedArrayElement(tasks, 0, m.UndefinedConstant());
   Node* const deferred_promise =
-      m.AllocateFixedArray(FAST_ELEMENTS, m.IntPtrConstant(1));
+      m.AllocateFixedArray(PACKED_ELEMENTS, m.IntPtrConstant(1));
   m.StoreFixedArrayElement(deferred_promise, 0, m.UndefinedConstant());
   Node* const info = m.AllocatePromiseReactionJobInfo(
       m.SmiConstant(1), tasks, deferred_promise, m.UndefinedConstant(),
@@ -2150,7 +2190,7 @@ TEST(CreatePromiseResolvingFunctions) {
   std::tie(resolve, reject) = m.CreatePromiseResolvingFunctions(
       promise, m.BooleanConstant(false), native_context);
   Node* const kSize = m.IntPtrConstant(2);
-  Node* const arr = m.AllocateFixedArray(FAST_ELEMENTS, kSize);
+  Node* const arr = m.AllocateFixedArray(PACKED_ELEMENTS, kSize);
   m.StoreFixedArrayElement(arr, 0, resolve);
   m.StoreFixedArrayElement(arr, 1, reject);
   m.Return(arr);
@@ -2448,7 +2488,7 @@ TEST(DirectMemoryTest8BitWord32Immediate) {
 
   m.Return(m.SmiConstant(1));
 
-  m.Bind(&bad);
+  m.BIND(&bad);
   m.Return(m.SmiConstant(0));
 
   Handle<Code> code = data.GenerateCode();
@@ -2485,7 +2525,7 @@ TEST(DirectMemoryTest16BitWord32Immediate) {
 
   m.Return(m.SmiConstant(1));
 
-  m.Bind(&bad);
+  m.BIND(&bad);
   m.Return(m.SmiConstant(0));
 
   Handle<Code> code = data.GenerateCode();
@@ -2534,7 +2574,7 @@ TEST(DirectMemoryTest8BitWord32) {
 
   m.Return(m.SmiConstant(1));
 
-  m.Bind(&bad);
+  m.BIND(&bad);
   m.Return(m.SmiConstant(0));
 
   Handle<Code> code = data.GenerateCode();
@@ -2597,7 +2637,7 @@ TEST(DirectMemoryTest16BitWord32) {
 
   m.Return(m.SmiConstant(1));
 
-  m.Bind(&bad);
+  m.BIND(&bad);
   m.Return(m.SmiConstant(0));
 
   Handle<Code> code = data.GenerateCode();

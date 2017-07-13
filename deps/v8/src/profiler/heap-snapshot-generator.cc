@@ -18,6 +18,7 @@
 #include "src/profiler/heap-snapshot-generator-inl.h"
 #include "src/prototype.h"
 #include "src/transitions.h"
+#include "src/visitors.h"
 
 namespace v8 {
 namespace internal {
@@ -171,14 +172,18 @@ namespace {  // Avoid littering the global namespace.
 template <size_t ptr_size> struct SnapshotSizeConstants;
 
 template <> struct SnapshotSizeConstants<4> {
-  static const int kExpectedHeapGraphEdgeSize = 12;
-  static const int kExpectedHeapEntrySize = 28;
+  static constexpr int kExpectedHeapGraphEdgeSize = 12;
+  static constexpr int kExpectedHeapEntrySize = 28;
 };
+constexpr int SnapshotSizeConstants<4>::kExpectedHeapGraphEdgeSize;
+constexpr int SnapshotSizeConstants<4>::kExpectedHeapEntrySize;
 
 template <> struct SnapshotSizeConstants<8> {
-  static const int kExpectedHeapGraphEdgeSize = 24;
-  static const int kExpectedHeapEntrySize = 40;
+  static constexpr int kExpectedHeapGraphEdgeSize = 24;
+  static constexpr int kExpectedHeapEntrySize = 40;
 };
+constexpr int SnapshotSizeConstants<8>::kExpectedHeapGraphEdgeSize;
+constexpr int SnapshotSizeConstants<8>::kExpectedHeapEntrySize;
 
 }  // namespace
 
@@ -269,6 +274,7 @@ HeapEntry* HeapSnapshot::AddEntry(HeapEntry::Type type,
                                   size_t size,
                                   unsigned trace_node_id) {
   HeapEntry entry(this, type, name, id, size, trace_node_id);
+  DCHECK(sorted_entries_.is_empty());
   entries_.Add(entry);
   return &entries_.last();
 }
@@ -290,26 +296,15 @@ void HeapSnapshot::FillChildren() {
   }
 }
 
-
-class FindEntryById {
- public:
-  explicit FindEntryById(SnapshotObjectId id) : id_(id) { }
-  int operator()(HeapEntry* const* entry) {
-    if ((*entry)->id() == id_) return 0;
-    return (*entry)->id() < id_ ? -1 : 1;
-  }
- private:
-  SnapshotObjectId id_;
-};
-
-
 HeapEntry* HeapSnapshot::GetEntryById(SnapshotObjectId id) {
   List<HeapEntry*>* entries_by_id = GetSortedEntriesList();
-  // Perform a binary search by id.
-  int index = SortedListBSearch(*entries_by_id, FindEntryById(id));
-  if (index == -1)
-    return NULL;
-  return entries_by_id->at(index);
+
+  auto it = std::lower_bound(
+      entries_by_id->begin(), entries_by_id->end(), id,
+      [](HeapEntry* first, SnapshotObjectId val) { return first->id() < val; });
+
+  if (it == entries_by_id->end() || (*it)->id() != id) return NULL;
+  return *it;
 }
 
 
@@ -686,9 +681,9 @@ SnapshotObjectId HeapObjectsMap::GenerateId(v8::RetainedObjectInfo* info) {
                                            static_cast<int>(strlen(label)),
                                            heap_->HashSeed());
   intptr_t element_count = info->GetElementCount();
-  if (element_count != -1)
-    id ^= ComputeIntegerHash(static_cast<uint32_t>(element_count),
-                             v8::internal::kZeroHashSeed);
+  if (element_count != -1) {
+    id ^= ComputeIntegerHash(static_cast<uint32_t>(element_count));
+  }
   return id << 1;
 }
 
@@ -782,7 +777,7 @@ HeapEntry* V8HeapExplorer::AddEntry(HeapObject* object) {
   if (object->IsJSFunction()) {
     JSFunction* func = JSFunction::cast(object);
     SharedFunctionInfo* shared = func->shared();
-    const char* name = names_->GetName(String::cast(shared->name()));
+    const char* name = names_->GetName(shared->name());
     return AddEntry(object, HeapEntry::kClosure, name);
   } else if (object->IsJSBoundFunction()) {
     return AddEntry(object, HeapEntry::kClosure, "native_bind");
@@ -822,7 +817,7 @@ HeapEntry* V8HeapExplorer::AddEntry(HeapObject* object) {
   } else if (object->IsCode()) {
     return AddEntry(object, HeapEntry::kCode, "");
   } else if (object->IsSharedFunctionInfo()) {
-    String* name = String::cast(SharedFunctionInfo::cast(object)->name());
+    String* name = SharedFunctionInfo::cast(object)->name();
     return AddEntry(object,
                     HeapEntry::kCode,
                     names_->GetName(name));
@@ -972,12 +967,12 @@ class IndexedReferencesExtractor : public ObjectVisitor {
         parent_end_(HeapObject::RawField(parent_obj_, parent_obj_->Size())),
         parent_(parent),
         next_index_(0) {}
-  void VisitCodeEntry(Address entry_address) override {
-     Code* code = Code::cast(Code::GetObjectFromEntryAddress(entry_address));
-     generator_->SetInternalReference(parent_obj_, parent_, "code", code);
-     generator_->TagCodeObject(code);
+  void VisitCodeEntry(JSFunction* host, Address entry_address) override {
+    Code* code = Code::cast(Code::GetObjectFromEntryAddress(entry_address));
+    generator_->SetInternalReference(parent_obj_, parent_, "code", code);
+    generator_->TagCodeObject(code);
   }
-  void VisitPointers(Object** start, Object** end) override {
+  void VisitPointers(HeapObject* host, Object** start, Object** end) override {
     for (Object** p = start; p < end; p++) {
       int index = static_cast<int>(p - HeapObject::RawField(parent_obj_, 0));
       ++next_index_;
@@ -1147,10 +1142,12 @@ void V8HeapExplorer::ExtractJSObjectReferences(
     SetInternalReference(view, entry, "buffer", view->buffer(),
                          JSArrayBufferView::kBufferOffset);
   }
+
   TagObject(js_obj->properties(), "(object properties)");
   SetInternalReference(obj, entry,
                        "properties", js_obj->properties(),
                        JSObject::kPropertiesOffset);
+
   TagObject(js_obj->elements(), "(object elements)");
   SetInternalReference(obj, entry,
                        "elements", js_obj->elements(),
@@ -1332,8 +1329,7 @@ void V8HeapExplorer::ExtractSharedFunctionInfoReferences(
         Code::Kind2String(shared->code()->kind())));
   }
 
-  SetInternalReference(obj, entry,
-                       "name", shared->name(),
+  SetInternalReference(obj, entry, "raw_name", shared->raw_name(),
                        SharedFunctionInfo::kNameOffset);
   SetInternalReference(obj, entry,
                        "code", shared->code(),
@@ -1364,9 +1360,6 @@ void V8HeapExplorer::ExtractSharedFunctionInfoReferences(
   SetInternalReference(obj, entry, "function_identifier",
                        shared->function_identifier(),
                        SharedFunctionInfo::kFunctionIdentifierOffset);
-  SetInternalReference(obj, entry,
-                       "optimized_code_map", shared->optimized_code_map(),
-                       SharedFunctionInfo::kOptimizedCodeMapOffset);
   SetInternalReference(obj, entry, "feedback_metadata",
                        shared->feedback_metadata(),
                        SharedFunctionInfo::kFeedbackMetadataOffset);
@@ -1458,8 +1451,6 @@ void V8HeapExplorer::ExtractCodeReferences(int entry, Code* code) {
                          code->type_feedback_info(),
                          Code::kTypeFeedbackInfoOffset);
   }
-  SetInternalReference(code, entry, "gc_metadata", code->gc_metadata(),
-                       Code::kGCMetadataOffset);
 }
 
 void V8HeapExplorer::ExtractCellReferences(int entry, Cell* cell) {
@@ -1484,8 +1475,9 @@ void V8HeapExplorer::ExtractPropertyCellReferences(int entry,
 
 void V8HeapExplorer::ExtractAllocationSiteReferences(int entry,
                                                      AllocationSite* site) {
-  SetInternalReference(site, entry, "transition_info", site->transition_info(),
-                       AllocationSite::kTransitionInfoOffset);
+  SetInternalReference(site, entry, "transition_info",
+                       site->transition_info_or_boilerplate(),
+                       AllocationSite::kTransitionInfoOrBoilerplateOffset);
   SetInternalReference(site, entry, "nested_site", site->nested_site(),
                        AllocationSite::kNestedSiteOffset);
   TagObject(site->dependent_code(), "(dependent code)");
@@ -1587,17 +1579,17 @@ void V8HeapExplorer::ExtractPropertyReferences(JSObject* js_obj, int entry) {
     }
   } else if (js_obj->IsJSGlobalObject()) {
     // We assume that global objects can only have slow properties.
-    GlobalDictionary* dictionary = js_obj->global_dictionary();
+    GlobalDictionary* dictionary =
+        JSGlobalObject::cast(js_obj)->global_dictionary();
     int length = dictionary->Capacity();
     for (int i = 0; i < length; ++i) {
-      Object* k = dictionary->KeyAt(i);
-      if (dictionary->IsKey(isolate, k)) {
-        DCHECK(dictionary->ValueAt(i)->IsPropertyCell());
-        PropertyCell* cell = PropertyCell::cast(dictionary->ValueAt(i));
+      if (dictionary->IsKey(isolate, dictionary->KeyAt(i))) {
+        PropertyCell* cell = dictionary->CellAt(i);
+        Name* name = cell->name();
         Object* value = cell->value();
         PropertyDetails details = cell->property_details();
-        SetDataOrAccessorPropertyReference(details.kind(), js_obj, entry,
-                                           Name::cast(k), value);
+        SetDataOrAccessorPropertyReference(details.kind(), js_obj, entry, name,
+                                           value);
       }
     }
   } else {
@@ -1636,11 +1628,11 @@ void V8HeapExplorer::ExtractAccessorPairProperty(JSObject* js_obj, int entry,
 
 void V8HeapExplorer::ExtractElementReferences(JSObject* js_obj, int entry) {
   Isolate* isolate = js_obj->GetIsolate();
-  if (js_obj->HasFastObjectElements()) {
+  if (js_obj->HasObjectElements()) {
     FixedArray* elements = FixedArray::cast(js_obj->elements());
-    int length = js_obj->IsJSArray() ?
-        Smi::cast(JSArray::cast(js_obj)->length())->value() :
-        elements->length();
+    int length = js_obj->IsJSArray()
+                     ? Smi::ToInt(JSArray::cast(js_obj)->length())
+                     : elements->length();
     for (int i = 0; i < length; ++i) {
       if (!elements->get(i)->IsTheHole(isolate)) {
         SetElementReference(js_obj, entry, i, elements->get(i));
@@ -1685,8 +1677,7 @@ HeapEntry* V8HeapExplorer::GetEntry(Object* obj) {
   return filler_->FindOrAddEntry(obj, this);
 }
 
-
-class RootsReferencesExtractor : public ObjectVisitor {
+class RootsReferencesExtractor : public RootVisitor {
  private:
   struct IndexTag {
     IndexTag(int index, VisitorSynchronization::SyncTag tag)
@@ -1702,7 +1693,7 @@ class RootsReferencesExtractor : public ObjectVisitor {
         heap_(heap) {
   }
 
-  void VisitPointers(Object** start, Object** end) override {
+  void VisitRootPointers(Root root, Object** start, Object** end) override {
     if (collecting_all_references_) {
       for (Object** p = start; p < end; p++) all_references_.Add(*p);
     } else {
@@ -2147,9 +2138,9 @@ void V8HeapExplorer::TagFixedArraySubType(const FixedArray* array,
   array_types_[array] = type;
 }
 
-class GlobalObjectsEnumerator : public ObjectVisitor {
+class GlobalObjectsEnumerator : public RootVisitor {
  public:
-  void VisitPointers(Object** start, Object** end) override {
+  void VisitRootPointers(Root root, Object** start, Object** end) override {
     for (Object** p = start; p < end; p++) {
       if ((*p)->IsNativeContext()) {
         Context* context = Context::cast(*p);

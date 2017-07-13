@@ -27,16 +27,84 @@
 
 function MjsUnitAssertionError(message) {
   this.message = message;
-  // This allows fetching the stack trace using TryCatch::StackTrace.
-  this.stack = new Error("").stack;
+  // Temporarily install a custom stack trace formatter and restore the
+  // previous value.
+  let prevPrepareStackTrace = Error.prepareStackTrace;
+  try {
+    Error.prepareStackTrace = MjsUnitAssertionError.prepareStackTrace;
+    // This allows fetching the stack trace using TryCatch::StackTrace.
+    this.stack = new Error("MjsUnitAssertionError").stack;
+  } finally {
+    Error.prepareStackTrace = prevPrepareStackTrace;
+  }
 }
+
+// Custom V8-specific stack trace formatter that is temporarily installed on
+// the Error object.
+MjsUnitAssertionError.prepareStackTrace = function(error, stack) {
+  // Trigger default formatting with recursion.
+  try {
+    // Filter-out all but the first mjsunit frame.
+    let filteredStack = [];
+    let inMjsunit = true;
+    for (let i = 0; i < stack.length; i++) {
+      let frame = stack[i];
+      if (inMjsunit) {
+        let file = frame.getFileName();
+        if (!file || !file.endsWith("mjsunit.js")) {
+          inMjsunit = false;
+          // Push the last mjsunit frame, typically containing the assertion
+          // function.
+          if (i > 0) filteredStack.push(stack[i-1]);
+          filteredStack.push(stack[i]);
+        }
+        continue;
+      }
+      filteredStack.push(frame);
+    }
+    stack = filteredStack;
+
+    // Infer function names and calculate {max_name_length}
+    let max_name_length = 0;
+    stack.forEach(each => {
+      let name = each.getFunctionName();
+      if (name == null) name = "";
+      if (each.isEval()) {
+        name = name;
+      } else if (each.isConstructor()) {
+        name = "new " + name;
+      } else if (each.isNative()) {
+        name = "native " + name;
+      } else if (!each.isToplevel()) {
+        name = each.getTypeName() + "." + name;
+      }
+      each.name = name;
+      max_name_length = Math.max(name.length, max_name_length)
+    });
+
+    // Format stack frames.
+    stack = stack.map(each => {
+      let frame = "    at " + each.name.padEnd(max_name_length);
+      let fileName = each.getFileName();
+      if (each.isEval()) return frame + " " + each.getEvalOrigin();
+      frame += " " + (fileName ? fileName : "");
+      let line= each.getLineNumber();
+      frame += " " + (line ? line : "");
+      let column = each.getColumnNumber();
+      frame += (column ? ":" + column : "");
+      return frame;
+    });
+    return "" + error.message + "\n" + stack.join("\n");
+  } catch(e) {};
+  return error.stack;
+}
+
 
 /*
  * This file is included in all mini jsunit test cases.  The test
  * framework expects lines that signal failed tests to start with
  * the f-word and ignore all other lines.
  */
-
 
 MjsUnitAssertionError.prototype.toString = function () {
   return this.message + "\n\nStack: " + this.stack;
@@ -54,6 +122,11 @@ var assertSame;
 // and the properties of non-Array objects).
 var assertEquals;
 
+// Expected and found values are not identical primitive values or functions
+// or similarly structured objects (checking internal properties
+// of, e.g., Number and Date objects, the elements of arrays
+// and the properties of non-Array objects).
+var assertNotEquals;
 
 // The difference between expected and found value is within certain tolerance.
 var assertEqualsDelta;
@@ -123,6 +196,9 @@ var assertMatches;
 // Assert the result of a promise.
 var assertPromiseResult;
 
+var promiseTestChain;
+var promiseTestCount = 0;
+
 // These bits must be in sync with bits defined in Runtime_GetOptimizationStatus
 var V8OptimizationStatus = {
   kIsFunction: 1 << 0,
@@ -134,7 +210,7 @@ var V8OptimizationStatus = {
   kInterpreted: 1 << 6
 };
 
-// Returns true if --no-crankshaft mode is on.
+// Returns true if --no-opt mode is on.
 var isNeverOptimize;
 
 // Returns true if --always-opt mode is on.
@@ -342,6 +418,12 @@ var failWithMessage;
     }
   };
 
+  assertNotEquals = function assertNotEquals(expected, found, name_opt) {
+    if (deepEquals(found, expected)) {
+      fail("not equals to " + PrettyPrint(expected), found, name_opt);
+    }
+  };
+
 
   assertEqualsDelta =
       function assertEqualsDelta(expected, found, delta, name_opt) {
@@ -422,7 +504,11 @@ var failWithMessage;
             'invalid use of assertThrows, maybe you want assertThrowsEquals');
       }
       if (arguments.length >= 3) {
-        assertEquals(cause_opt, e.message);
+        if (cause_opt instanceof RegExp) {
+          assertMatches(cause_opt, e.message, "Error message");
+        } else {
+          assertEquals(cause_opt, e.message, "Error message");
+        }
       }
       // Success.
       return;
@@ -499,21 +585,35 @@ var failWithMessage;
     // We have to patch mjsunit because normal assertion failures just throw
     // exceptions which are swallowed in a then clause.
     // We use eval here to avoid parsing issues with the natives syntax.
-    failWithMessage = (msg) => eval("%AbortJS(msg)");
-    if (!fail)
-      fail = result => failWithMessage("assertPromiseResult failed: " + result);
+    if (!success) success = () => {};
 
-    eval("%IncrementWaitCount()");
-    promise.then(
-      result => {
-        eval("%DecrementWaitCount()");
-        success(result);
-      },
-      result => {
-        eval("%DecrementWaitCount()");
-        fail(result);
-      }
-    );
+    failWithMessage = (msg) => eval("%AbortJS(msg)");
+    if (!fail) {
+      fail = result => failWithMessage("assertPromiseResult failed: " + result);
+    }
+
+    var test_promise =
+        promise.then(
+          result => {
+            try {
+              success(result);
+            } catch (e) {
+              failWithMessage(e);
+            }
+          },
+          result => {
+            fail(result);
+          }
+        )
+        .then((x)=> {
+          if (--promiseTestCount == 0) testRunner.notifyDone();
+        });
+
+    if (!promiseTestChain) promiseTestChain = Promise.resolve();
+    // waitUntilDone is idempotent.
+    testRunner.waitUntilDone();
+    ++promiseTestCount;
+    return promiseTestChain.then(test_promise);
   };
 
   var OptimizationStatusImpl = undefined;
@@ -533,7 +633,7 @@ var failWithMessage;
   assertUnoptimized = function assertUnoptimized(fun, sync_opt, name_opt) {
     if (sync_opt === undefined) sync_opt = "";
     var opt_status = OptimizationStatus(fun, sync_opt);
-    // Tests that use assertOptimized() do not make sense if --always-opt
+    // Tests that use assertUnoptimized() do not make sense if --always-opt
     // option is provided. Such tests must add --no-always-opt to flags comment.
     assertFalse((opt_status & V8OptimizationStatus.kAlwaysOptimize) !== 0,
                 "test does not make sense with --always-opt");
@@ -550,10 +650,10 @@ var failWithMessage;
   assertOptimized = function assertOptimized(fun, sync_opt, name_opt) {
     if (sync_opt === undefined) sync_opt = "";
     var opt_status = OptimizationStatus(fun, sync_opt);
-    // Tests that use assertOptimized() do not make sense if --no-crankshaft
-    // option is provided. Such tests must add --crankshaft to flags comment.
+    // Tests that use assertOptimized() do not make sense if --no-opt
+    // option is provided. Such tests must add --opt to flags comment.
     assertFalse((opt_status & V8OptimizationStatus.kNeverOptimize) !== 0,
-                "test does not make sense with --no-crankshaft");
+                "test does not make sense with --no-opt");
     assertTrue((opt_status & V8OptimizationStatus.kIsFunction) !== 0, name_opt);
     if ((opt_status & V8OptimizationStatus.kMaybeDeopted) !== 0) {
       // When --deopt-every-n-times flag is specified it's no longer guaranteed

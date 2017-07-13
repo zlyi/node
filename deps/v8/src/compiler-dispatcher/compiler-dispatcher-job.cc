@@ -65,7 +65,7 @@ CompilerDispatcherJob::CompilerDispatcherJob(
     CompilerDispatcherTracer* tracer, size_t max_stack_size,
     Handle<String> source, int start_position, int end_position,
     LanguageMode language_mode, int function_literal_id, bool native,
-    bool module, bool is_named_expression, bool calls_eval, uint32_t hash_seed,
+    bool module, bool is_named_expression, uint32_t hash_seed,
     AccountingAllocator* zone_allocator, int compiler_hints,
     const AstStringConstants* ast_string_constants,
     CompileJobFinishCallback* finish_callback)
@@ -90,11 +90,14 @@ CompilerDispatcherJob::CompilerDispatcherJob(
   parse_info_->set_language_mode(language_mode);
   parse_info_->set_function_literal_id(function_literal_id);
   parse_info_->set_ast_string_constants(ast_string_constants);
+  if (V8_UNLIKELY(FLAG_runtime_stats)) {
+    parse_info_->set_runtime_call_stats(new (parse_info_->zone())
+                                            RuntimeCallStats());
+  }
 
   parse_info_->set_native(native);
   parse_info_->set_module(module);
   parse_info_->set_is_named_expression(is_named_expression);
-  parse_info_->set_calls_eval(calls_eval);
 
   parser_.reset(new Parser(parse_info_.get()));
   parser_->DeserializeScopeChain(parse_info_.get(), MaybeHandle<ScopeInfo>());
@@ -174,6 +177,50 @@ CompilerDispatcherJob::~CompilerDispatcherJob() {
 bool CompilerDispatcherJob::IsAssociatedWith(
     Handle<SharedFunctionInfo> shared) const {
   return *shared_ == *shared;
+}
+
+void CompilerDispatcherJob::StepNextOnMainThread() {
+  switch (status()) {
+    case CompileJobStatus::kInitial:
+      return PrepareToParseOnMainThread();
+
+    case CompileJobStatus::kReadyToParse:
+      return Parse();
+
+    case CompileJobStatus::kParsed:
+      return FinalizeParsingOnMainThread();
+
+    case CompileJobStatus::kReadyToAnalyze:
+      return AnalyzeOnMainThread();
+
+    case CompileJobStatus::kAnalyzed:
+      return PrepareToCompileOnMainThread();
+
+    case CompileJobStatus::kReadyToCompile:
+      return Compile();
+
+    case CompileJobStatus::kCompiled:
+      return FinalizeCompilingOnMainThread();
+
+    case CompileJobStatus::kFailed:
+    case CompileJobStatus::kDone:
+      return;
+  }
+  UNREACHABLE();
+}
+
+void CompilerDispatcherJob::StepNextOnBackgroundThread() {
+  DCHECK(CanStepNextOnAnyThread());
+  switch (status()) {
+    case CompileJobStatus::kReadyToParse:
+      return Parse();
+
+    case CompileJobStatus::kReadyToCompile:
+      return Compile();
+
+    default:
+      UNREACHABLE();
+  }
 }
 
 void CompilerDispatcherJob::PrepareToParseOnMainThread() {
@@ -267,6 +314,10 @@ void CompilerDispatcherJob::PrepareToParseOnMainThread() {
   parse_info_->set_unicode_cache(unicode_cache_.get());
   parse_info_->set_language_mode(shared_->language_mode());
   parse_info_->set_function_literal_id(shared_->function_literal_id());
+  if (V8_UNLIKELY(FLAG_runtime_stats)) {
+    parse_info_->set_runtime_call_stats(new (parse_info_->zone())
+                                            RuntimeCallStats());
+  }
 
   parser_.reset(new Parser(parse_info_.get()));
   MaybeHandle<ScopeInfo> outer_scope_info;
@@ -276,7 +327,7 @@ void CompilerDispatcherJob::PrepareToParseOnMainThread() {
   }
   parser_->DeserializeScopeChain(parse_info_.get(), outer_scope_info);
 
-  Handle<String> name(String::cast(shared_->name()));
+  Handle<String> name(shared_->name());
   parse_info_->set_function_name(
       parse_info_->ast_value_factory()->GetString(name));
   status_ = CompileJobStatus::kReadyToParse;
@@ -308,7 +359,7 @@ void CompilerDispatcherJob::Parse() {
   }
 }
 
-bool CompilerDispatcherJob::FinalizeParsingOnMainThread() {
+void CompilerDispatcherJob::FinalizeParsingOnMainThread() {
   DCHECK(ThreadId::Current().Equals(isolate_->thread_id()));
   DCHECK(status() == CompileJobStatus::kParsed);
   COMPILER_DISPATCHER_TRACE_SCOPE(tracer_, kFinalizeParsing);
@@ -335,6 +386,7 @@ bool CompilerDispatcherJob::FinalizeParsingOnMainThread() {
     status_ = CompileJobStatus::kReadyToAnalyze;
   }
   parser_->UpdateStatistics(isolate_, script);
+  parse_info_->UpdateStatisticsAfterBackgroundParse(isolate_);
 
   DeferredHandleScope scope(isolate_);
   {
@@ -359,11 +411,9 @@ bool CompilerDispatcherJob::FinalizeParsingOnMainThread() {
     character_stream_.reset();
   }
   parse_info_->set_deferred_handles(scope.Detach());
-
-  return status_ != CompileJobStatus::kFailed;
 }
 
-bool CompilerDispatcherJob::AnalyzeOnMainThread() {
+void CompilerDispatcherJob::AnalyzeOnMainThread() {
   DCHECK(ThreadId::Current().Equals(isolate_->thread_id()));
   DCHECK(status() == CompileJobStatus::kReadyToAnalyze);
   COMPILER_DISPATCHER_TRACE_SCOPE(tracer_, kAnalyze);
@@ -385,11 +435,9 @@ bool CompilerDispatcherJob::AnalyzeOnMainThread() {
     }
   }
   compile_info_->set_deferred_handles(scope.Detach());
-
-  return status_ != CompileJobStatus::kFailed;
 }
 
-bool CompilerDispatcherJob::PrepareToCompileOnMainThread() {
+void CompilerDispatcherJob::PrepareToCompileOnMainThread() {
   DCHECK(ThreadId::Current().Equals(isolate_->thread_id()));
   DCHECK(status() == CompileJobStatus::kAnalyzed);
   COMPILER_DISPATCHER_TRACE_SCOPE(tracer_, kPrepareToCompile);
@@ -399,12 +447,11 @@ bool CompilerDispatcherJob::PrepareToCompileOnMainThread() {
   if (!compile_job_.get()) {
     if (!isolate_->has_pending_exception()) isolate_->StackOverflow();
     status_ = CompileJobStatus::kFailed;
-    return false;
+    return;
   }
 
   CHECK(compile_job_->can_execute_on_background_thread());
   status_ = CompileJobStatus::kReadyToCompile;
-  return true;
 }
 
 void CompilerDispatcherJob::Compile() {
@@ -429,7 +476,7 @@ void CompilerDispatcherJob::Compile() {
   status_ = CompileJobStatus::kCompiled;
 }
 
-bool CompilerDispatcherJob::FinalizeCompilingOnMainThread() {
+void CompilerDispatcherJob::FinalizeCompilingOnMainThread() {
   DCHECK(ThreadId::Current().Equals(isolate_->thread_id()));
   DCHECK(status() == CompileJobStatus::kCompiled);
   COMPILER_DISPATCHER_TRACE_SCOPE(tracer_, kFinalizeCompiling);
@@ -444,7 +491,7 @@ bool CompilerDispatcherJob::FinalizeCompilingOnMainThread() {
         !Compiler::FinalizeCompilationJob(compile_job_.release())) {
       if (!isolate_->has_pending_exception()) isolate_->StackOverflow();
       status_ = CompileJobStatus::kFailed;
-      return false;
+      return;
     }
   }
 
@@ -454,7 +501,6 @@ bool CompilerDispatcherJob::FinalizeCompilingOnMainThread() {
   parse_info_.reset();
 
   status_ = CompileJobStatus::kDone;
-  return true;
 }
 
 void CompilerDispatcherJob::ResetOnMainThread() {
@@ -516,7 +562,6 @@ double CompilerDispatcherJob::EstimateRuntimeOfNextStepInMs() const {
   }
 
   UNREACHABLE();
-  return 0.0;
 }
 
 void CompilerDispatcherJob::ShortPrint() {
